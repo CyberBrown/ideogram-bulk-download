@@ -6,7 +6,7 @@ Uses undetected-chromedriver to bypass Cloudflare bot detection.
 Opens your real Chrome browser in a way that doesn't trigger anti-bot.
 
 SETUP:
-  pip install undetected-chromedriver selenium
+  pip install undetected-chromedriver selenium setuptools
 
 USAGE:
   python3 download_stealth.py
@@ -15,6 +15,7 @@ USAGE:
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,8 +27,22 @@ try:
     from selenium.webdriver.support import expected_conditions as EC
 except ImportError:
     print("Install dependencies first:")
-    print("  pip install undetected-chromedriver selenium")
+    print("  pip install undetected-chromedriver selenium setuptools")
     sys.exit(1)
+
+
+def detect_chrome_version():
+    """Auto-detect installed Chrome/Chromium version."""
+    for chrome_bin in ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+                       '/usr/bin/google-chrome', '/usr/bin/chromium']:
+        try:
+            out = subprocess.check_output([chrome_bin, '--version'], text=True, stderr=subprocess.DEVNULL).strip()
+            ver = int(out.split()[-1].split('.')[0])
+            print(f"   Detected {chrome_bin} → version {ver}")
+            return ver
+        except Exception:
+            continue
+    return None
 
 
 def main():
@@ -42,9 +57,14 @@ def main():
     print("\n🌐 Launching Chrome (undetected mode)...")
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1920,1080")
-    # Don't use headless — we need to be "real"
     
-    driver = uc.Chrome(options=options, version_main=None)
+    chrome_ver = detect_chrome_version()
+    if chrome_ver:
+        print(f"   Using Chrome version: {chrome_ver}")
+    else:
+        print("   Could not detect Chrome version, letting driver auto-detect...")
+    
+    driver = uc.Chrome(options=options, version_main=chrome_ver)
     
     try:
         # Navigate to ideogram
@@ -189,24 +209,25 @@ def main():
                     continue
                 
                 # Use selenium to download via the authenticated session
-                driver.execute_script(f"""
+                # Chunk the base64 to avoid stack overflow on large images
+                driver.execute_script("""
                     var xhr = new XMLHttpRequest();
-                    xhr.open('GET', '{url}', false);
+                    xhr.open('GET', arguments[0], false);
                     xhr.responseType = 'arraybuffer';
                     xhr.send();
-                    if (xhr.status === 200) {{
-                        var blob = new Blob([xhr.response]);
-                        var a = document.createElement('a');
-                        a.href = URL.createObjectURL(blob);
-                        a.download = 'img_{i:04d}.png';
-                        document.body.appendChild(a);
-                        window.__last_download_data = btoa(String.fromCharCode.apply(null, new Uint8Array(xhr.response)));
-                        window.__last_download_status = xhr.status;
-                    }} else {{
-                        window.__last_download_status = xhr.status;
-                        window.__last_download_data = null;
-                    }}
-                """)
+                    window.__last_download_status = xhr.status;
+                    window.__last_download_data = null;
+                    if (xhr.status === 200) {
+                        var bytes = new Uint8Array(xhr.response);
+                        var binary = '';
+                        var chunkSize = 8192;
+                        for (var j = 0; j < bytes.length; j += chunkSize) {
+                            var chunk = bytes.subarray(j, Math.min(j + chunkSize, bytes.length));
+                            binary += String.fromCharCode.apply(null, chunk);
+                        }
+                        window.__last_download_data = btoa(binary);
+                    }
+                """, url)
                 
                 status = driver.execute_script("return window.__last_download_status")
                 b64data = driver.execute_script("return window.__last_download_data")
@@ -229,8 +250,6 @@ def main():
                     failed += 1
                     
             except Exception as e:
-                # For large images, the base64 approach may fail
-                # Fall back to direct navigation download
                 try:
                     url = get_image_url(img)
                     if url:
